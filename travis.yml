@@ -1,0 +1,10 @@
+language: python
+
+services:
+  - docker
+
+before_install:
+  - docker build -t minikeyvalue -f Dockerfile .
+
+script:
+  - docker run --hostname localhost minikeyvalue bash -c "cd /tmp && (./bringup.sh &) && ./test.py"
