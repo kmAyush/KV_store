@@ -8,22 +8,23 @@ import hashlib
 import tempfile
 import requests
 
-# *** Global ***
+print("Process Type ", os.environ['TYPE'], os.getpid())
 
-print("hello", os.environ['TYPE'], os.getpid())
-
-def resp(start_response, code, headers=[('Content-type', 'text/plain')], body=b''):
+# Add header to the response
+def response_message(start_response, code, headers=[('Content-type', 'text/plain')], body=b''):
   start_response(code, headers)
   return [body]
 
-# *** Master Server ***
+# MASTER SERVER
 
-# TODO: don't use leveldb cause it's single process
 class SimpleKV(object):
-  def __init__(self, fn):
+  
+  # Create a new instance of the SimpleKV class
+  def __init__(self, fn): 
     import plyvel
-    self.db = plyvel.DB(fn, create_if_missing=True)
+    self.db = plyvel.DB(fn, create_if_missing=True) 
 
+  # utility functions for plyvel
   def get(self, k):
     return self.db.get(k)
 
@@ -40,50 +41,61 @@ if os.environ['TYPE'] == "master":
 
   for v in volumes:
     print(v)
-
+  # Create an instance of the SimpleKV class
   db = SimpleKV(os.environ['DB'])
+
 
 def master(env, sr):
   host = env['SERVER_NAME'] + ":" + env['SERVER_PORT']
   key = env['PATH_INFO']
 
+  # POST is called by the volume servers to write to the database
   if env['REQUEST_METHOD'] == 'POST':
-    # POST is called by the volume servers to write to the database
+    # Get the length of the content
     flen = int(env.get('CONTENT_LENGTH', '0'))
     print("posting", key, flen)
+
     if flen > 0:
       db.put(key.encode('utf-8'), env['wsgi.input'].read())
     else:
       db.delete(key.encode('utf-8'))
-    return resp(sr, '200 OK')
+    return response_message(sr, '200 OK')
 
+  # Get the value of the key
   metakey = db.get(key.encode('utf-8'))
   print(key, metakey)
-  if metakey is None:
+
+  if metakey is None:      
+    # key not found put it in a random volume
     if env['REQUEST_METHOD'] == 'PUT':
-      # handle putting key
-      # TODO: make volume selection intelligent
       volume = random.choice(volumes)
     else:
       # this key doesn't exist and we aren't trying to create it
-      return resp(sr, '404 Not Found')
+      return response_message(sr, '404 Not Found')
+    
   else:
     # key found 
     if env['REQUEST_METHOD'] == 'PUT':
-      # we are trying to put it. delete first!
-      return resp(sr, '409 Conflict')
+      # already exists, return conflict
+      return response_message(sr, '409 Conflict')
+    
     meta = json.loads(metakey.decode('utf-8'))
-    volume = meta['volume']
+    volume = meta['volume'] # get the volume from the metadata
 
   # send the redirect
   headers = [('Location', 'http://%s%s?%s' % (volume, key, host))]
 
-  return resp(sr, '307 Temporary Redirect', headers)
+  return response_message(sr, '307 Temporary Redirect', headers)
 
-# *** Volume Server ***
+
+
+
+
+
+# VOLUME SERVER
 
 class FileCache(object):
-  # this is a single computer on disk key value store
+  # FileCache is a simple key value store that stores files on disk in a directory structure
 
   def __init__(self, basedir):
     self.basedir = os.path.realpath(basedir)
@@ -91,10 +103,11 @@ class FileCache(object):
     os.makedirs(self.tmpdir, exist_ok=True)
     print("FileCache in %s" % basedir)
 
+  # key to path converter
   def k2p(self, key, mkdir_ok=False):
     key = hashlib.md5(key.encode('utf-8')).hexdigest()
 
-    # 2 layers deep in nginx world
+    # Path is two layers deep in nginx cache with md5 hash
     path = self.basedir+"/"+key[0:2]+"/"+key[0:4]
     if not os.path.isdir(path) and mkdir_ok:
       # exist ok is fine, could be a race
@@ -102,6 +115,7 @@ class FileCache(object):
 
     return os.path.join(path, key)
 
+  # utility functions
   def exists(self, key):
     return os.path.isfile(self.k2p(key))
 
@@ -118,13 +132,10 @@ class FileCache(object):
 
   def put(self, key, stream):
     with tempfile.NamedTemporaryFile(dir=self.tmpdir, delete=False) as f:
-      # TODO: in chunks, don't waste RAM
       f.write(stream.read())
 
-      # save the real name in xattr in case we rebuild cache
+      # Save the real name in xattr in case we rebuild cache
       xattr.setxattr(f.name, 'user.key', key.encode('utf-8'))
-
-      # TODO: check hash
       os.rename(f.name, self.k2p(key, True))
 
 if os.environ['TYPE'] == "volume":
@@ -136,47 +147,53 @@ def volume(env, sr):
   host = env['SERVER_NAME'] + ":" + env['SERVER_PORT']
   key = env['PATH_INFO']
 
+  # For PUT requests
   if env['REQUEST_METHOD'] == 'PUT':
+    # check if the key exists in the FileCache
     if fc.exists(key):
       req = requests.post("http://"+env['QUERY_STRING']+key, json={"volume": host})
-      # can't write, already exists
-      return resp(sr, '409 Conflict')
+      return response_message(sr, '409 Conflict')
 
     flen = int(env.get('CONTENT_LENGTH', '0'))
     if flen > 0:
+      # write the content to the FileCache
       fc.put(key, env['wsgi.input'])
       req = requests.post("http://"+env['QUERY_STRING']+key, json={"volume": host})
       if req.status_code == 200:
-        return resp(sr, '201 Created')
+        return response_message(sr, '201 Created')
       else:
         fc.delete(key)
-        return resp(sr, '500 Internal Server Error')
+        return response_message(sr, '500 Internal Server Error')
+      
     else:
-      return resp(sr, '411 Length Required')
+      return response_message(sr, '411 Length Required')
 
+
+  # For DELETE requests
   if env['REQUEST_METHOD'] == 'DELETE':
     req = requests.post("http://"+env['QUERY_STRING']+key, data='')
     if req.status_code == 200:
       if fc.delete(key):
-        return resp(sr, '200 OK')
+        return response_message(sr, '200 OK')
       else:
-        # file wasn't on our disk
-        return resp(sr, '500 Internal Server Error (not on disk)')
+        return response_message(sr, '500 Internal Server Error (not on disk)')
     else:
-      return resp(sr, '500 Internal Server Error (master db write fail)')
+      return response_message(sr, '500 Internal Server Error (master db write fail)')
 
   if not fc.exists(key):
     # key not in the FileCache, 404
-    return resp(sr, '404 Not Found')
+    return response_message(sr, '404 Not Found')
 
+
+  # For GET requests
   if env['REQUEST_METHOD'] == 'GET':
-    # TODO: in chunks, don't waste RAM
+        
     if 'HTTP_RANGE' in env:
       b,e = [int(x) for x in env['HTTP_RANGE'].split("=")[1].split("-")]
       f = fc.get(key)
       f.seek(b)
       ret = f.read(e-b)
       f.close()
-      return resp(sr, '200 OK', body=ret)
+      return response_message(sr, '200 OK', body=ret)
     else:
-      return resp(sr, '200 OK', body=fc.get(key).read())
+      return response_message(sr, '200 OK', body=fc.get(key).read())

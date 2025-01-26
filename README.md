@@ -22,7 +22,7 @@ A scalable and lightweight distributed key-value store system with master-volume
 
 ## Project Structure
 
-- **`server.py`**: Core implementation of the master and volume server logic.
+- **`serve.py`**: Core implementation of the master and volume server logic.
 - **`start.sh`**: Script to start the master and volume servers.
 - **`test.py`**: Unit tests for verifying functionality.
 - **Dockerfile**: Environment setup for containerized deployment.
